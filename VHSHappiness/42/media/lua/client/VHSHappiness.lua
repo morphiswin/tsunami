@@ -2,9 +2,9 @@
     VHS Happiness
 
     Watching a VHS tape on a TV lowers unhappiness, the same way reading a
-    book or comic does. The bonus builds up while you watch, and each tape can
-    only give its full amount once per CooldownHours, so swapping between the
-    same few tapes doesn't stack forever.
+    book or comic does. Each line of the tape that plays while you're watching
+    gives its share, so watching a whole tape gives the full amount. A tape
+    gives its bonus once per CooldownHours.
 
     Mood values use the same 0-100 scale as the UnhappyChange field in the
     game's literature item scripts:
@@ -15,23 +15,15 @@
     from BodyDamage to Stats/CharacterStat).
 ]]
 
--- Build 41 and Build 42 each have their own copy of this file. Only run once
--- if a game version ever loads both.
-if VHSHappiness and VHSHappiness.loaded then return end
-
-VHSHappiness = VHSHappiness or {}
-VHSHappiness.loaded = true
+VHSHappiness = {}
 
 VHSHappiness.Config = {
-    -- Total unhappiness removed by watching one tape.
+    -- Total unhappiness removed by watching a whole tape.
     RetailVHSTotal = 40, -- movies / TV series tapes: same as reading a book
     HomeVHSTotal = 20,   -- home video tapes: same as reading a comic book
 
-    -- In-game minutes of watching needed to get a tape's full total. The bonus
-    -- is spread evenly over this time, so stopping early gives part of it.
-    MinutesForFullBonus = 45,
-
     -- In-game hours before the same tape can give its bonus again.
+    -- 0 means no limit.
     CooldownHours = 24,
 
     -- How far (in tiles, same floor) you can be from the TV and still count
@@ -41,21 +33,12 @@ VHSHappiness.Config = {
     -- Require an unobstructed line of sight to the TV (walls block it).
     RequireLineOfSight = true,
 
-    -- Show a green "Unhappiness" arrow when the bonus starts.
+    -- Show a green "Unhappiness" arrow when a tape starts cheering you up.
     ShowHaloText = true,
     HaloText = "Unhappiness",
 }
 
 local Config = VHSHappiness.Config
-
--- Calls a no-argument method, returning nil if the object or method is
--- missing on this game version.
-local function safeCall(obj, method)
-    if obj == nil then return nil end
-    local ok, result = pcall(function() return obj[method](obj) end)
-    if ok then return result end
-    return nil
-end
 
 -----------------------------------------------------------------------------
 -- Unhappiness
@@ -75,7 +58,7 @@ function VHSHappiness.reduceUnhappiness(player, amount)
         return (current - new) / scale
     end
 
-    -- Build 41 / early Build 42: unhappiness lives on BodyDamage.
+    -- Build 41 to 42.12: unhappiness lives on BodyDamage.
     local bodyDamage = player:getBodyDamage()
     local current = bodyDamage:getUnhappynessLevel()
     local new = math.max(0, current - amount)
@@ -84,23 +67,8 @@ function VHSHappiness.reduceUnhappiness(player, amount)
 end
 
 -----------------------------------------------------------------------------
--- Finding a TV that's playing a tape
+-- Tapes
 -----------------------------------------------------------------------------
-
-local function getMediaData(deviceData)
-    local media = safeCall(deviceData, "getMediaData")
-    if media then return media end
-
-    -- Older builds: look the tape up by its index.
-    local index = safeCall(deviceData, "getMediaIndex")
-    if index == nil or index < 0 then return nil end
-    local radio = getZomboidRadio and getZomboidRadio()
-    local recorded = safeCall(radio, "getRecordedMedia")
-    if not recorded then return nil end
-    local ok, result = pcall(function() return recorded:getMediaDataFromIndex(index) end)
-    if ok then return result end
-    return nil
-end
 
 function VHSHappiness.getTapeTotal(category)
     if category and string.find(string.lower(tostring(category)), "home") then
@@ -109,61 +77,30 @@ function VHSHappiness.getTapeTotal(category)
     return Config.RetailVHSTotal
 end
 
--- Returns { id, total } for the tape this device is playing, or nil if it
--- isn't a TV playing a tape. TVs only accept VHS tapes.
-function VHSHappiness.getPlayingTape(deviceData)
-    if not deviceData then return nil end
-    if not safeCall(deviceData, "getIsTelevision") then return nil end
-    if not safeCall(deviceData, "getIsTurnedOn") then return nil end
-    if not safeCall(deviceData, "isPlayingMedia") then return nil end
-
-    local media = getMediaData(deviceData)
-    local id = safeCall(media, "getId")
-    if id == nil then
-        id = "index:" .. tostring(safeCall(deviceData, "getMediaIndex"))
+local function tapeHasLine(media, guid)
+    if guid == nil then return false end
+    for i = 0, media:getLineCount() - 1 do
+        local line = media:getLine(i)
+        if line and line:getTextGuid() == guid then
+            return true
+        end
     end
-    return {
-        id = tostring(id),
-        total = VHSHappiness.getTapeTotal(safeCall(media, "getCategory")),
-    }
+    return false
 end
 
-local function canSee(square, playerNum)
-    if not Config.RequireLineOfSight then return true end
-    local ok, result = pcall(function() return square:isCouldSee(playerNum) end)
-    -- If the check isn't available, don't block the bonus over it.
-    if not ok then return true end
-    return result == true
-end
-
--- Returns the tape the player is currently watching, or nil.
-function VHSHappiness.findWatchedTape(player)
-    local square = player:getCurrentSquare()
-    if not square then return nil end
-
-    local cell = getCell()
-    local px, py, pz = square:getX(), square:getY(), square:getZ()
-    local maxDist = Config.MaxDistance
-    local radius = math.ceil(maxDist)
-    local playerNum = player:getPlayerNum()
-
-    for x = px - radius, px + radius do
-        for y = py - radius, py + radius do
-            local dx, dy = x - px, y - py
-            if dx * dx + dy * dy <= maxDist * maxDist then
-                local sq = cell:getGridSquare(x, y, pz)
-                if sq then
-                    local objects = sq:getObjects()
-                    for i = 0, objects:size() - 1 do
-                        local obj = objects:get(i)
-                        if instanceof(obj, "IsoWaveSignal") then
-                            local tape = VHSHappiness.getPlayingTape(obj:getDeviceData())
-                            if tape and canSee(sq, playerNum) then
-                                return tape
-                            end
-                        end
-                    end
-                end
+-- The game passes the device that showed the line; if it ever doesn't, find
+-- the TV on that square instead.
+local function getDeviceData(device, square)
+    if device then
+        return device:getDeviceData()
+    end
+    local objects = square:getObjects()
+    for i = 0, objects:size() - 1 do
+        local obj = objects:get(i)
+        if instanceof(obj, "IsoWaveSignal") then
+            local deviceData = obj:getDeviceData()
+            if deviceData and deviceData:getIsTelevision() then
+                return deviceData
             end
         end
     end
@@ -171,17 +108,30 @@ function VHSHappiness.findWatchedTape(player)
 end
 
 -----------------------------------------------------------------------------
+-- Watching
+-----------------------------------------------------------------------------
+
+function VHSHappiness.isWatching(player, tvSquare)
+    if player:isDead() or player:isAsleep() then return false end
+
+    local square = player:getCurrentSquare()
+    if not square or square:getZ() ~= tvSquare:getZ() then return false end
+
+    local dx = square:getX() - tvSquare:getX()
+    local dy = square:getY() - tvSquare:getY()
+    if dx * dx + dy * dy > Config.MaxDistance * Config.MaxDistance then return false end
+
+    return not Config.RequireLineOfSight or tvSquare:isCouldSee(player:getPlayerNum())
+end
+
+-----------------------------------------------------------------------------
 -- Per-tape progress (saved with the character)
 -----------------------------------------------------------------------------
 
-local function getTapeRecords(player)
+local function getTapeRecord(player, tapeId, now)
     local modData = player:getModData()
     modData.VHSHappiness = modData.VHSHappiness or {}
-    return modData.VHSHappiness
-end
-
-local function getTapeRecord(player, tapeId, now)
-    local records = getTapeRecords(player)
+    local records = modData.VHSHappiness
     local record = records[tapeId]
     if not record or now - record.start >= Config.CooldownHours then
         record = { start = now, given = 0 }
@@ -195,55 +145,59 @@ end
 -----------------------------------------------------------------------------
 
 local function showHalo(player)
-    if not Config.ShowHaloText or not HaloTextHelper then return end
-    local ok, green = pcall(HaloTextHelper.getColorGreen)
-    if not ok then return end
-    -- Build 42.13+ takes a separator argument; earlier builds don't.
-    if pcall(HaloTextHelper.addTextWithArrow, player, Config.HaloText, "[br/]", false, green) then return end
-    pcall(HaloTextHelper.addTextWithArrow, player, Config.HaloText, false, green)
+    if not Config.ShowHaloText then return end
+    -- Purely cosmetic, so never let it break the mood change.
+    pcall(function()
+        HaloTextHelper.addTextWithArrow(player, Config.HaloText, false, HaloTextHelper.getColorGreen())
+    end)
 end
 
 -----------------------------------------------------------------------------
--- Update loop
+-- Events
 -----------------------------------------------------------------------------
 
--- Tape each local player was last rewarded for, so the halo only shows when
--- a viewing starts rather than every minute.
-local currentTape = {}
+-- Last tape that cheered up each local player, so the halo shows when a
+-- viewing starts rather than on every line.
+local lastTape = {}
 
-function VHSHappiness.updatePlayer(player)
-    local playerNum = player:getPlayerNum()
-    if player:isDead() or player:isAsleep() then
-        currentTape[playerNum] = nil
-        return
-    end
-
-    local tape = VHSHappiness.findWatchedTape(player)
-    if not tape then
-        currentTape[playerNum] = nil
-        return
-    end
-
-    local record = getTapeRecord(player, tape.id, getGameTime():getWorldAgeHours())
-    local remaining = tape.total - record.given
-    if remaining <= 0 then return end
-
-    local perMinute = tape.total / math.max(1, Config.MinutesForFullBonus)
-    local amount = math.min(remaining, perMinute)
+local function creditLine(player, tape, now)
+    local record = getTapeRecord(player, tape.id, now)
+    -- Capped at the tape's total, so rewinds and rewatches don't add up.
+    local amount = math.min(tape.total / tape.lineCount, tape.total - record.given)
+    if amount <= 0 then return end
+    local firstLine = record.given == 0
     record.given = record.given + amount
 
     local removed = VHSHappiness.reduceUnhappiness(player, amount)
-    if removed > 0 and currentTape[playerNum] ~= tape.id then
-        currentTape[playerNum] = tape.id
+    local playerNum = player:getPlayerNum()
+    if removed > 0 and (firstLine or lastTape[playerNum] ~= tape.id) then
         showHalo(player)
     end
+    lastTape[playerNum] = tape.id
 end
 
-function VHSHappiness.onEveryOneMinute()
+-- Fires for every line a radio or TV shows, including each line of a tape.
+function VHSHappiness.onDeviceText(guid, codes, x, y, z, text, device)
+    local square = getCell():getGridSquare(math.floor(x), math.floor(y), math.floor(z))
+    if not square then return end
+
+    local deviceData = getDeviceData(device, square)
+    if not deviceData or not deviceData:getIsTelevision() then return end
+    local media = deviceData:getMediaData()
+    if not media or media:getLineCount() <= 0 then return end
+    -- Only lines from the tape count, not TV broadcasts.
+    if not deviceData:isPlayingMedia() and not tapeHasLine(media, guid) then return end
+
+    local tape = {
+        id = media:getId(),
+        total = VHSHappiness.getTapeTotal(media:getCategory()),
+        lineCount = media:getLineCount(),
+    }
+    local now = getGameTime():getWorldAgeHours()
     for playerNum = 0, getNumActivePlayers() - 1 do
         local player = getSpecificPlayer(playerNum)
-        if player then
-            VHSHappiness.updatePlayer(player)
+        if player and VHSHappiness.isWatching(player, square) then
+            creditLine(player, tape, now)
         end
     end
 end
@@ -253,16 +207,22 @@ function VHSHappiness.onEveryDays()
     local now = getGameTime():getWorldAgeHours()
     for playerNum = 0, getNumActivePlayers() - 1 do
         local player = getSpecificPlayer(playerNum)
-        if player then
-            local records = getTapeRecords(player)
+        local records = player and player:getModData().VHSHappiness
+        if records then
+            -- Collect first: removing keys while looping with pairs() can
+            -- throw in the game's Lua engine.
+            local expired = {}
             for id, record in pairs(records) do
                 if now - record.start >= Config.CooldownHours then
-                    records[id] = nil
+                    table.insert(expired, id)
                 end
+            end
+            for _, id in ipairs(expired) do
+                records[id] = nil
             end
         end
     end
 end
 
-Events.EveryOneMinute.Add(VHSHappiness.onEveryOneMinute)
+Events.OnDeviceText.Add(VHSHappiness.onDeviceText)
 Events.EveryDays.Add(VHSHappiness.onEveryDays)

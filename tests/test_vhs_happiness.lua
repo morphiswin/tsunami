@@ -3,6 +3,25 @@
 
 local MOD_FILE = MOD_ROOT .. "/VHSHappiness/42/media/lua/client/VHSHappiness.lua"
 
+-- The game's Lua engine (Kahlua) throws if a table changes while pairs() is
+-- walking it. Plain Lua allows that, so make pairs() strict here too.
+local rawPairs = pairs
+pairs = function(t)
+    local function size()
+        local n = 0
+        for _ in rawPairs(t) do n = n + 1 end
+        return n
+    end
+    local startSize = size()
+    local iter, state, key = rawPairs(t)
+    return function(s, k)
+        if size() ~= startSize then
+            error("ConcurrentModificationException: table changed during pairs()", 2)
+        end
+        return iter(s, k)
+    end, state, key
+end
+
 -----------------------------------------------------------------------------
 -- Mock game world
 -----------------------------------------------------------------------------
@@ -34,26 +53,39 @@ local function getSquare(x, y, z)
     return world.squares[key]
 end
 
-local function newMedia(id, category)
+-- A tape with `lineCount` lines whose guids are "<id>:1", "<id>:2", ...
+-- `sameGuid` optionally maps line numbers to a shared guid, like the many
+-- vanilla tapes that repeat a line such as "[music]".
+local function newTape(id, category, lineCount, sameGuid)
+    local guids, lines = {}, {}
+    for i = 1, lineCount do
+        local guid = (sameGuid and sameGuid[i]) or (id .. ":" .. i)
+        guids[i] = guid
+        lines[i] = { getTextGuid = function() return guid end }
+    end
     return {
+        guids = guids,
         getId = function() return id end,
         getCategory = function() return category end,
+        getLineCount = function() return lineCount end,
+        getLine = function(_, i) return lines[i + 1] end, -- 0-based, like Java
     }
 end
 
--- Places a TV at (x, y, z) and returns its device data so tests can tweak it.
-local function addTV(x, y, z, media)
-    local dd = { tv = true, on = true, playing = true, media = media, index = 7 }
+-- Places a radio/TV at (x, y, z). Returns the world object; its device data
+-- is in .dd so tests can tweak it.
+local function addDevice(x, y, z, tape, isTV)
+    local dd = { tv = isTV ~= false, playing = tape ~= nil, media = tape }
     function dd:getIsTelevision() return self.tv end
-    function dd:getIsTurnedOn() return self.on end
     function dd:isPlayingMedia() return self.playing end
     function dd:getMediaData() return self.media end
-    function dd:getMediaIndex() return self.index end
-    local tv = { __class = "IsoWaveSignal" }
-    function tv:getDeviceData() return dd end
-    table.insert(getSquare(x, y, z).objects, tv)
-    return dd
+    local obj = { __class = "IsoWaveSignal", x = x, y = y, z = z, dd = dd }
+    function obj:getDeviceData() return self.dd end
+    table.insert(getSquare(x, y, z).objects, obj)
+    return obj
 end
+
+local function addTV(x, y, z, tape) return addDevice(x, y, z, tape, true) end
 
 local function newPlayer(x, y, z, unhappiness)
     local p = {
@@ -66,6 +98,7 @@ local function newPlayer(x, y, z, unhappiness)
     function p:isAsleep() return self.asleep end
     function p:getModData() return self.modData end
     function p:getBodyDamage()
+        assert(CharacterStat == nil, "BodyDamage unhappiness doesn't exist on Build 42.13+")
         local player = self
         return {
             getUnhappynessLevel = function() return player.unhappiness end,
@@ -91,24 +124,22 @@ end
 
 -- Sets up the global API the mod uses and loads a fresh copy of the mod.
 -- options.statMax: if set, mimic Build 42.13+ (CharacterStat with that max).
--- options.haloSignature: "b41" (4 args) or "b42" (5 args with separator).
 local function loadMod(options)
     options = options or {}
-    world = { squares = {}, hours = 0, players = {}, halos = {}, mediaByIndex = {} }
+    world = { squares = {}, hours = 0, players = {}, halos = {}, handlers = {} }
 
-    local handlers = {}
     Events = {}
-    for _, name in ipairs({ "EveryOneMinute", "EveryDays" }) do
-        handlers[name] = {}
-        Events[name] = { Add = function(fn) table.insert(handlers[name], fn) end }
-    end
-    world.fire = function(name)
-        for _, fn in ipairs(handlers[name]) do fn() end
+    for _, name in ipairs({ "OnDeviceText", "EveryDays" }) do
+        world.handlers[name] = {}
+        Events[name] = {
+            Add = function(fn) table.insert(world.handlers[name], fn) end,
+        }
     end
 
     getCell = function()
         return {
             getGridSquare = function(_, x, y, z)
+                assert(x == math.floor(x) and y == math.floor(y) and z == math.floor(z), "whole coords")
                 return world.squares[x .. "," .. y .. "," .. z]
             end,
         }
@@ -119,15 +150,6 @@ local function loadMod(options)
     getNumActivePlayers = function() return #world.players end
     getSpecificPlayer = function(i) return world.players[i + 1] end
     instanceof = function(obj, name) return type(obj) == "table" and obj.__class == name end
-    getZomboidRadio = function()
-        return {
-            getRecordedMedia = function()
-                return {
-                    getMediaDataFromIndex = function(_, i) return world.mediaByIndex[i] end,
-                }
-            end,
-        }
-    end
 
     if options.statMax then
         local stat = { max = options.statMax }
@@ -138,18 +160,13 @@ local function loadMod(options)
         CharacterStat = nil
     end
 
-    local signature = options.haloSignature or "b42"
+    -- Only the 4-argument addTextWithArrow exists on every game version.
     HaloTextHelper = {
         getColorGreen = function() return "green" end,
         addTextWithArrow = function(...)
-            local args = { ... }
-            if signature == "b42" then
-                assert(select("#", ...) == 5 and type(args[3]) == "string", "bad b42 halo call")
-                table.insert(world.halos, { text = args[2], up = args[4], color = args[5] })
-            else
-                assert(select("#", ...) == 4 and type(args[3]) == "boolean", "bad b41 halo call")
-                table.insert(world.halos, { text = args[2], up = args[3], color = args[4] })
-            end
+            assert(select("#", ...) == 4, "expected the 4-argument addTextWithArrow")
+            local player, text, arrowIsUp, color = ...
+            table.insert(world.halos, { player = player, text = text, up = arrowIsUp, color = color })
         end,
     }
 
@@ -157,11 +174,26 @@ local function loadMod(options)
     dofile(MOD_FILE)
 end
 
--- Advances the clock by `minutes` in-game minutes, firing the mod's events.
-local function watch(minutes)
-    for _ = 1, minutes do
+local function fire(name, ...)
+    for _, fn in ipairs(world.handlers[name]) do fn(...) end
+end
+
+-- The game showing one line on a device, as OnDeviceText reports it.
+-- Coordinates are floats, so they may not be whole numbers; pass
+-- passDevice=false to leave out the device argument.
+local function showLine(device, guid, passDevice)
+    fire("OnDeviceText", guid, "BOR-1", device.x + 0.5, device.y + 0.5, device.z,
+        "line text", passDevice ~= false and device or nil)
+end
+
+-- Plays lines first..last of the tape in `tv`, one in-game minute apart.
+local function play(tv, first, last)
+    local tape = tv.dd.media
+    first = first or 1
+    last = last or #tape.guids
+    for i = first, last do
         world.hours = world.hours + 1 / 60
-        world.fire("EveryOneMinute")
+        showLine(tv, tape.guids[i])
     end
 end
 
@@ -189,214 +221,289 @@ end
 -- Tests
 -----------------------------------------------------------------------------
 
-test("retail tape gives a book's worth (40) spread over 45 minutes", function()
+test("whole retail tape gives a book's worth (40), spread over its lines", function()
     loadMod()
-    addTV(12, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(12, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 80)
-    watch(1)
-    near(p.unhappiness, 80 - 40 / 45, "after 1 minute")
-    watch(44)
-    near(p.unhappiness, 40, "after 45 minutes")
-    watch(60)
-    near(p.unhappiness, 40, "capped after the full bonus")
+    play(tv, 1, 1)
+    near(p.unhappiness, 80 - 40 / 18, "after 1 line")
+    play(tv, 2, 18)
+    near(p.unhappiness, 40, "after the whole tape")
 end)
 
-test("home video gives a comic's worth (20)", function()
+test("whole home video gives a comic's worth (20)", function()
     loadMod()
-    addTV(10, 13, 0, newMedia("home-1", "Home-VHS"))
+    local tv = addTV(10, 13, 0, newTape("home", "Home-VHS", 7))
     local p = addPlayer(10, 10, 0, 80)
-    watch(120)
+    play(tv)
     near(p.unhappiness, 60)
 end)
 
-test("same tape works again after the cooldown", function()
+test("half a tape gives half, and finishing it later gives the rest", function()
     loadMod()
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10))
     local p = addPlayer(10, 10, 0, 100)
-    watch(60)
-    near(p.unhappiness, 60, "first viewing")
-    watch(23 * 60) -- one in-game day after the first viewing started
-    near(p.unhappiness, 60, "still on cooldown")
-    watch(60)
-    near(p.unhappiness, 20, "second viewing")
+    play(tv, 1, 5)
+    near(p.unhappiness, 80, "half")
+    world.hours = world.hours + 5
+    play(tv, 6, 10)
+    near(p.unhappiness, 60, "rest")
 end)
 
-test("stopping early keeps progress for the rest of the tape", function()
+test("a tape that repeats a line still gives its full amount", function()
     loadMod()
-    local dd = addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local music = { [2] = "music", [5] = "music", [8] = "music" }
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10, music))
     local p = addPlayer(10, 10, 0, 100)
-    watch(9)
-    dd.playing = false
-    watch(30)
-    near(p.unhappiness, 92, "paused")
-    dd.playing = true
-    watch(60)
-    near(p.unhappiness, 60, "finished later")
+    play(tv)
+    near(p.unhappiness, 60)
+end)
+
+test("rewatching within the cooldown gives nothing, after it gives the full amount again", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv)
+    near(p.unhappiness, 60, "first viewing")
+    world.hours = world.hours + 20
+    play(tv)
+    near(p.unhappiness, 60, "rewatch on cooldown")
+    world.hours = world.hours + 4
+    play(tv)
+    near(p.unhappiness, 20, "after the cooldown")
+end)
+
+test("CooldownHours = 0 removes the limit", function()
+    loadMod()
+    VHSHappiness.Config.CooldownHours = 0
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv)
+    play(tv)
+    near(p.unhappiness, 20)
 end)
 
 test("a different tape has its own bonus", function()
     loadMod()
-    local dd = addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("movie-1", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 100)
-    watch(60)
-    dd.media = newMedia("movie-2", "Retail-VHS")
-    watch(60)
+    play(tv)
+    tv.dd.media = newTape("movie-2", "Retail-VHS", 30)
+    play(tv)
     near(p.unhappiness, 20)
 end)
 
 test("unhappiness never goes below zero", function()
     loadMod()
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 5)
-    watch(60)
+    play(tv)
     near(p.unhappiness, 0)
 end)
 
-test("no bonus when the TV is off, not playing, or not a TV", function()
-    for _, field in ipairs({ "on", "playing", "tv" }) do
+test("TV broadcasts don't count, even with a tape inserted", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    tv.dd.playing = false
+    local p = addPlayer(10, 10, 0, 50)
+    showLine(tv, "life-and-living-broadcast-line")
+    near(p.unhappiness, 50)
+end)
+
+test("extra lines while a tape plays can't push a tape past its total", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10))
+    local p = addPlayer(10, 10, 0, 100)
+    for i = 1, 20 do
+        showLine(tv, "not-from-the-tape-" .. i)
+    end
+    play(tv)
+    near(p.unhappiness, 60)
+end)
+
+test("a tape line still counts if playback stopped as it was shown", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10))
+    tv.dd.playing = false
+    local p = addPlayer(10, 10, 0, 50)
+    showLine(tv, "movie:10")
+    near(p.unhappiness, 46)
+end)
+
+test("no bonus from a TV with no tape, or from a radio playing a CD", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, nil)
+    local p = addPlayer(10, 10, 0, 50)
+    showLine(tv, "broadcast-line")
+    near(p.unhappiness, 50, "no tape")
+
+    loadMod()
+    local radio = addDevice(11, 10, 0, newTape("cd", "CDs", 10), false)
+    p = addPlayer(10, 10, 0, 50)
+    play(radio)
+    near(p.unhappiness, 50, "CD on a radio")
+end)
+
+test("no bonus when too far, on another floor, out of sight, asleep or dead", function()
+    local cases = {
+        { "9 tiles away", function() return addTV(19, 10, 0, newTape("t", "Retail-VHS", 5)) end },
+        { "another floor", function() return addTV(10, 10, 1, newTape("t", "Retail-VHS", 5)) end },
+        { "behind a wall", function()
+            local tv = addTV(12, 10, 0, newTape("t", "Retail-VHS", 5))
+            getSquare(12, 10, 0).visible = false
+            return tv
+        end },
+        { "asleep", function(p) p.asleep = true; return addTV(11, 10, 0, newTape("t", "Retail-VHS", 5)) end },
+        { "dead", function(p) p.dead = true; return addTV(11, 10, 0, newTape("t", "Retail-VHS", 5)) end },
+    }
+    for _, case in ipairs(cases) do
         loadMod()
-        local dd = addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
-        dd[field] = false
         local p = addPlayer(10, 10, 0, 50)
-        watch(60)
-        near(p.unhappiness, 50, field)
+        play(case[2](p))
+        near(p.unhappiness, 50, case[1])
     end
 end)
 
-test("no bonus when too far, on another floor, or out of sight", function()
+test("walls don't matter when line of sight is turned off", function()
     loadMod()
-    addTV(19, 10, 0, newMedia("far", "Retail-VHS"))
-    local p = addPlayer(10, 10, 0, 50)
-    watch(60)
-    near(p.unhappiness, 50, "9 tiles away")
-
-    loadMod()
-    addTV(10, 10, 1, newMedia("upstairs", "Retail-VHS"))
-    p = addPlayer(10, 10, 0, 50)
-    watch(60)
-    near(p.unhappiness, 50, "another floor")
-
-    loadMod()
-    addTV(12, 10, 0, newMedia("behind-wall", "Retail-VHS"))
+    VHSHappiness.Config.RequireLineOfSight = false
+    local tv = addTV(12, 10, 0, newTape("t", "Retail-VHS", 5))
     getSquare(12, 10, 0).visible = false
-    p = addPlayer(10, 10, 0, 50)
-    watch(60)
-    near(p.unhappiness, 50, "behind a wall")
-end)
-
-test("works at exactly the max distance", function()
-    loadMod()
-    addTV(18, 10, 0, newMedia("edge", "Retail-VHS"))
     local p = addPlayer(10, 10, 0, 50)
-    watch(60)
+    play(tv)
     near(p.unhappiness, 10)
 end)
 
-test("no bonus while asleep", function()
+test("counts at exactly the max distance", function()
     loadMod()
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(18, 10, 0, newTape("t", "Retail-VHS", 5))
     local p = addPlayer(10, 10, 0, 50)
-    p.asleep = true
-    watch(60)
-    near(p.unhappiness, 50)
+    play(tv)
+    near(p.unhappiness, 10)
 end)
 
 test("Build 42.13+ stats API (0-100 scale)", function()
     loadMod({ statMax = 100 })
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 70)
-    watch(60)
+    play(tv)
     near(p.unhappiness, 30)
 end)
 
 test("Build 42.13+ stats API (0-1 scale) is rescaled", function()
     loadMod({ statMax = 1 })
-    addTV(11, 10, 0, newMedia("home-1", "Home-VHS"))
+    local tv = addTV(11, 10, 0, newTape("t", "Home-VHS", 18))
     local p = addPlayer(10, 10, 0, 70)
-    watch(60)
+    play(tv)
     near(p.unhappiness, 50)
 end)
 
-test("falls back to looking the tape up by index", function()
+test("finds the TV on the square if the event doesn't pass the device", function()
     loadMod()
-    local dd = addTV(11, 10, 0, nil)
-    dd.getMediaData = nil
-    world.mediaByIndex[7] = newMedia("home-by-index", "Home-VHS")
-    local p = addPlayer(10, 10, 0, 70)
-    watch(60)
-    near(p.unhappiness, 50)
-    assert(p.modData.VHSHappiness["home-by-index"], "record keyed by tape id")
+    local tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 2))
+    table.insert(getSquare(11, 10, 0).objects, 1, { __class = "IsoWaveSignal", getDeviceData = function() return nil end })
+    local p = addPlayer(10, 10, 0, 50)
+    showLine(tv, "t:1", false)
+    showLine(tv, "t:2", false)
+    near(p.unhappiness, 10)
 end)
 
-test("unknown tape still counts as a retail tape", function()
+test("halo shows when a tape starts cheering you up, not on every line", function()
     loadMod()
-    local dd = addTV(11, 10, 0, nil)
-    dd.getMediaData = nil
-    local p = addPlayer(10, 10, 0, 70)
-    watch(60)
-    near(p.unhappiness, 30)
-end)
-
-test("halo shows once when a viewing starts (Build 42 signature)", function()
-    loadMod({ haloSignature = "b42" })
-    local dd = addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
-    addPlayer(10, 10, 0, 100)
-    watch(10)
+    local tv = addTV(11, 10, 0, newTape("movie-1", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv, 1, 9)
     assert(#world.halos == 1, "one halo, got " .. #world.halos)
-    assert(world.halos[1].text == "Unhappiness" and world.halos[1].up == false)
-    dd.playing = false
-    watch(1)
-    dd.playing = true
-    watch(1)
-    assert(#world.halos == 2, "halo again after resuming")
+    local halo = world.halos[1]
+    assert(halo.player == p and halo.text == "Unhappiness" and halo.up == false and halo.color == "green")
+
+    tv.dd.media = newTape("movie-2", "Retail-VHS", 18)
+    play(tv, 1, 3)
+    assert(#world.halos == 2, "new halo for a different tape")
+
+    tv.dd.media = newTape("movie-1", "Retail-VHS", 18)
+    play(tv, 10, 12)
+    assert(#world.halos == 3, "new halo when going back to the first tape")
+
+    world.hours = world.hours + 24
+    play(tv, 1, 2)
+    assert(#world.halos == 4, "new halo for a fresh viewing after the cooldown")
 end)
 
-test("halo uses the Build 41 signature when needed", function()
-    loadMod({ haloSignature = "b41" })
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
-    addPlayer(10, 10, 0, 100)
-    watch(5)
-    assert(#world.halos == 1, "one halo, got " .. #world.halos)
-end)
-
-test("no halo when already perfectly happy", function()
+test("no halo when already perfectly happy, or when turned off", function()
     loadMod()
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 5))
     addPlayer(10, 10, 0, 0)
-    watch(5)
-    assert(#world.halos == 0)
+    play(tv)
+    assert(#world.halos == 0, "already happy")
+
+    loadMod()
+    VHSHappiness.Config.ShowHaloText = false
+    tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 5))
+    addPlayer(10, 10, 0, 50)
+    play(tv)
+    assert(#world.halos == 0, "turned off")
+end)
+
+test("a broken halo never blocks the mood change", function()
+    loadMod()
+    HaloTextHelper = nil
+    local tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 5))
+    local p = addPlayer(10, 10, 0, 50)
+    play(tv)
+    near(p.unhappiness, 10)
 end)
 
 test("split-screen players each get their own bonus", function()
     loadMod()
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    local tv = addTV(11, 10, 0, newTape("t", "Retail-VHS", 18))
     local p1 = addPlayer(10, 10, 0, 50)
     local p2 = addPlayer(12, 10, 0, 30)
-    watch(60)
+    local p3 = addPlayer(30, 10, 0, 30)
+    play(tv)
     near(p1.unhappiness, 10, "player 1")
     near(p2.unhappiness, 0, "player 2")
+    near(p3.unhappiness, 30, "player 3, too far away")
 end)
 
-test("expired records are pruned daily", function()
+test("expired records are pruned daily without tripping pairs()", function()
     loadMod()
-    local dd = addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
-    local p = addPlayer(10, 10, 0, 50)
-    watch(60)
-    dd.playing = false
-    world.fire("EveryDays")
-    assert(p.modData.VHSHappiness["movie-1"], "kept during cooldown")
-    watch(24 * 60)
-    world.fire("EveryDays")
-    assert(p.modData.VHSHappiness["movie-1"] == nil, "pruned after cooldown")
+    local tv = addTV(11, 10, 0, newTape("old-1", "Retail-VHS", 5))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv)
+    tv.dd.media = newTape("old-2", "Retail-VHS", 5)
+    play(tv)
+    world.hours = world.hours + 12
+    tv.dd.media = newTape("recent", "Retail-VHS", 5)
+    play(tv)
+
+    fire("EveryDays")
+    local records = p.modData.VHSHappiness
+    assert(records["old-1"] and records["old-2"] and records["recent"], "all kept during cooldown")
+
+    world.hours = world.hours + 13
+    fire("EveryDays")
+    assert(records["old-1"] == nil and records["old-2"] == nil, "expired records pruned")
+    assert(records["recent"], "record still on cooldown kept")
 end)
 
-test("loading the file twice doesn't double the bonus", function()
+test("progress saved by the first version of the mod carries over", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 100)
+    p.modData.VHSHappiness = { movie = { start = 0, given = 30 } }
+    play(tv)
+    near(p.unhappiness, 90)
+end)
+
+test("loading the file twice can't push a tape past its total", function()
     loadMod()
     dofile(MOD_FILE)
-    addTV(11, 10, 0, newMedia("movie-1", "Retail-VHS"))
+    assert(#world.handlers.OnDeviceText == 2, "both copies registered")
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 80)
-    watch(1)
-    near(p.unhappiness, 80 - 40 / 45)
+    play(tv)
+    near(p.unhappiness, 40)
 end)
 
 -----------------------------------------------------------------------------
