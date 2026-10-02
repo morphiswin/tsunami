@@ -32,7 +32,8 @@ VHSHappiness.Config = {
     -- Require an unobstructed line of sight to the TV (walls block it).
     RequireLineOfSight = true,
 
-    -- Show a green "Unhappiness" arrow when a tape starts cheering you up.
+    -- Show a green "Unhappiness" arrow with every line that cheers you up,
+    -- like the game's own "Boredom" arrow.
     ShowHaloText = true,
     HaloText = "Unhappiness",
 }
@@ -200,24 +201,18 @@ end
 -- Events
 -----------------------------------------------------------------------------
 
--- Last tape that cheered up each local player, so the halo shows when a
--- viewing starts rather than on every line.
-local lastTape = {}
-
 local function creditLine(player, tape)
     local progress = getTapeProgress(player)
     local given = getGiven(progress, tape.id)
     -- Capped at the tape's total, so rewinds and rewatches don't add up.
     local amount = math.min(tape.total / tape.lineCount, tape.total - given)
-    if amount <= 0 then return end
+    -- Ignore rounding leftovers once the whole tape has been counted.
+    if amount <= tape.total * 1e-6 then return end
     progress[tape.id] = given + amount
 
-    local removed = VHSHappiness.reduceUnhappiness(player, amount)
-    local playerNum = player:getPlayerNum()
-    if removed > 0 and (given == 0 or lastTape[playerNum] ~= tape.id) then
+    if VHSHappiness.reduceUnhappiness(player, amount) > 0 then
         showHalo(player)
     end
-    lastTape[playerNum] = tape.id
 end
 
 -- Fires for every line a radio or TV shows, including each line of a tape.

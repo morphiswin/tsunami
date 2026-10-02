@@ -29,7 +29,8 @@ little. A whole tape gives the same amount as the game's own reading material:
   retail and 14 home videos.
 - You count as watching if you're within 8 tiles of the TV, on the same
   floor, with no wall in the way, and awake.
-- A green "Unhappiness ↓" note pops up when a tape starts cheering you up.
+- A green "Unhappiness ↓" note pops up with every line that cheers you up,
+  alongside the game's own "Boredom" note.
 - Boredom and skill XP from tapes are left to the vanilla game.
 
 ## Install (local mod)
@@ -67,7 +68,7 @@ Open `VHSHappiness.lua` (the one for your build) and change the values in
 | `HomeVHSTotal`       | 20      | Unhappiness removed by a whole home video tape        |
 | `MaxDistance`        | 8       | How many tiles from the TV still counts as watching   |
 | `RequireLineOfSight` | true    | Walls between you and the TV block the bonus          |
-| `ShowHaloText`       | true    | Show the "Unhappiness ↓" note when a tape starts      |
+| `ShowHaloText`       | true    | Show the "Unhappiness ↓" note with each line          |
 
 ## Notes
 

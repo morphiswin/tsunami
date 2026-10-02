@@ -421,25 +421,29 @@ test("finds the TV on the square if the event doesn't pass the device", function
     near(p.unhappiness, 10)
 end)
 
-test("halo shows when a tape starts cheering you up, not on every line", function()
+test("halo shows with every line that cheers you up, like the Boredom one", function()
     loadMod()
-    local tv = addTV(11, 10, 0, newTape("movie-1", "Retail-VHS", 18))
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 100)
     play(tv, 1, 9)
-    assert(#world.halos == 1, "one halo, got " .. #world.halos)
+    assert(#world.halos == 9, "one halo per line, got " .. #world.halos)
     local halo = world.halos[1]
     assert(halo.player == p and halo.text == "Unhappiness" and halo.up == false and halo.color == "green")
 
-    tv.dd.media = newTape("movie-2", "Retail-VHS", 18)
-    play(tv, 1, 3)
-    assert(#world.halos == 2, "new halo for a different tape")
-
-    tv.dd.media = newTape("movie-1", "Retail-VHS", 18)
     play(tv, 10, 18)
-    assert(#world.halos == 3, "new halo when going back to the first tape")
+    assert(#world.halos == 18, "halo through to the last line, got " .. #world.halos)
 
     play(tv)
-    assert(#world.halos == 3, "no halo once the tape is used up")
+    assert(#world.halos == 18, "no halo once the tape is used up")
+end)
+
+test("halo stops once unhappiness reaches zero", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 5) -- each line removes 40/18 = 2.2
+    play(tv)
+    near(p.unhappiness, 0)
+    assert(#world.halos == 3, "halos only while it was going down, got " .. #world.halos)
 end)
 
 test("no halo when already perfectly happy, or when turned off", function()
