@@ -3,8 +3,11 @@
 
     Watching a VHS tape on a TV lowers unhappiness, the same way reading a
     book or comic does. Each line of the tape that plays while you're watching
-    gives its share, so watching a whole tape gives the full amount. A tape
-    gives its bonus once per CooldownHours.
+    gives its share, so watching a whole tape gives the full amount.
+
+    Each tape cheers a character up only once, ever, so new tapes are worth
+    hunting for. Skill tapes (ones that teach a skill or recipe) give no
+    happiness at all; they only give the game's normal skill XP.
 
     Mood values use the same 0-100 scale as the UnhappyChange field in the
     game's literature item scripts:
@@ -22,10 +25,6 @@ VHSHappiness.Config = {
     RetailVHSTotal = 40, -- movies / TV series tapes: same as reading a book
     HomeVHSTotal = 20,   -- home video tapes: same as reading a comic book
 
-    -- In-game hours before the same tape can give its bonus again.
-    -- 0 means no limit.
-    CooldownHours = 24,
-
     -- How far (in tiles, same floor) you can be from the TV and still count
     -- as watching it.
     MaxDistance = 8,
@@ -39,6 +38,11 @@ VHSHappiness.Config = {
 }
 
 local Config = VHSHappiness.Config
+
+-- Codes the game's tapes use for mood changes (boredom, stress, fatigue,
+-- panic). Any other code on a tape, like CRP+1 or RCP=Make Fishing Rod,
+-- means it teaches a skill or recipe.
+local MOOD_CODES = { BOR = true, STS = true, FAT = true, PAN = true }
 
 -----------------------------------------------------------------------------
 -- Unhappiness
@@ -88,6 +92,42 @@ local function tapeHasLine(media, guid)
     return false
 end
 
+-- Whether a line's codes (e.g. "BOR-1,CRP+1") include anything but mood
+-- changes. Each comma-separated code starts with its name.
+local function teachesSkill(codes)
+    local length = string.len(codes)
+    local pos = 1
+    while pos <= length do
+        local comma = string.find(codes, ",", pos, true) or length + 1
+        local first, last = string.find(codes, "%a+", pos)
+        if first and not MOOD_CODES[string.upper(string.sub(codes, first, last))] then
+            return true
+        end
+        pos = comma + 1
+    end
+    return false
+end
+
+local skillTapes = {}
+
+-- Whether any line of the tape teaches a skill or recipe. Checked once per
+-- tape, so a skill tape gives no happiness even before its first lesson.
+function VHSHappiness.isSkillTape(media)
+    local id = media:getId()
+    if skillTapes[id] == nil then
+        skillTapes[id] = false
+        for i = 0, media:getLineCount() - 1 do
+            local line = media:getLine(i)
+            local codes = line and line:getCodes()
+            if codes and teachesSkill(codes) then
+                skillTapes[id] = true
+                break
+            end
+        end
+    end
+    return skillTapes[id]
+end
+
 -- The game passes the device that showed the line; if it ever doesn't, find
 -- the TV on that square instead.
 local function getDeviceData(device, square)
@@ -125,19 +165,23 @@ function VHSHappiness.isWatching(player, tvSquare)
 end
 
 -----------------------------------------------------------------------------
--- Per-tape progress (saved with the character)
+-- Per-tape progress (saved with the character, never reset)
 -----------------------------------------------------------------------------
 
-local function getTapeRecord(player, tapeId, now)
+-- Happiness each tape has given this character so far, by tape id.
+local function getTapeProgress(player)
     local modData = player:getModData()
     modData.VHSHappiness = modData.VHSHappiness or {}
-    local records = modData.VHSHappiness
-    local record = records[tapeId]
-    if not record or now - record.start >= Config.CooldownHours then
-        record = { start = now, given = 0 }
-        records[tapeId] = record
+    return modData.VHSHappiness
+end
+
+local function getGiven(progress, tapeId)
+    local given = progress[tapeId] or 0
+    -- Earlier versions of the mod saved { start = ..., given = ... }.
+    if type(given) == "table" then
+        given = given.given or 0
     end
-    return record
+    return given
 end
 
 -----------------------------------------------------------------------------
@@ -160,17 +204,17 @@ end
 -- viewing starts rather than on every line.
 local lastTape = {}
 
-local function creditLine(player, tape, now)
-    local record = getTapeRecord(player, tape.id, now)
+local function creditLine(player, tape)
+    local progress = getTapeProgress(player)
+    local given = getGiven(progress, tape.id)
     -- Capped at the tape's total, so rewinds and rewatches don't add up.
-    local amount = math.min(tape.total / tape.lineCount, tape.total - record.given)
+    local amount = math.min(tape.total / tape.lineCount, tape.total - given)
     if amount <= 0 then return end
-    local firstLine = record.given == 0
-    record.given = record.given + amount
+    progress[tape.id] = given + amount
 
     local removed = VHSHappiness.reduceUnhappiness(player, amount)
     local playerNum = player:getPlayerNum()
-    if removed > 0 and (firstLine or lastTape[playerNum] ~= tape.id) then
+    if removed > 0 and (given == 0 or lastTape[playerNum] ~= tape.id) then
         showHalo(player)
     end
     lastTape[playerNum] = tape.id
@@ -187,42 +231,19 @@ function VHSHappiness.onDeviceText(guid, codes, x, y, z, text, device)
     if not media or media:getLineCount() <= 0 then return end
     -- Only lines from the tape count, not TV broadcasts.
     if not deviceData:isPlayingMedia() and not tapeHasLine(media, guid) then return end
+    if VHSHappiness.isSkillTape(media) then return end
 
     local tape = {
         id = media:getId(),
         total = VHSHappiness.getTapeTotal(media:getCategory()),
         lineCount = media:getLineCount(),
     }
-    local now = getGameTime():getWorldAgeHours()
     for playerNum = 0, getNumActivePlayers() - 1 do
         local player = getSpecificPlayer(playerNum)
         if player and VHSHappiness.isWatching(player, square) then
-            creditLine(player, tape, now)
-        end
-    end
-end
-
--- Drop records whose cooldown has ended so mod data doesn't grow forever.
-function VHSHappiness.onEveryDays()
-    local now = getGameTime():getWorldAgeHours()
-    for playerNum = 0, getNumActivePlayers() - 1 do
-        local player = getSpecificPlayer(playerNum)
-        local records = player and player:getModData().VHSHappiness
-        if records then
-            -- Collect first: removing keys while looping with pairs() can
-            -- throw in the game's Lua engine.
-            local expired = {}
-            for id, record in pairs(records) do
-                if now - record.start >= Config.CooldownHours then
-                    table.insert(expired, id)
-                end
-            end
-            for _, id in ipairs(expired) do
-                records[id] = nil
-            end
+            creditLine(player, tape)
         end
     end
 end
 
 Events.OnDeviceText.Add(VHSHappiness.onDeviceText)
-Events.EveryDays.Add(VHSHappiness.onEveryDays)

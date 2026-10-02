@@ -54,14 +54,21 @@ local function getSquare(x, y, z)
 end
 
 -- A tape with `lineCount` lines whose guids are "<id>:1", "<id>:2", ...
--- `sameGuid` optionally maps line numbers to a shared guid, like the many
--- vanilla tapes that repeat a line such as "[music]".
-local function newTape(id, category, lineCount, sameGuid)
+-- Every line has the code "BOR-1" (boredom), like most vanilla lines.
+-- options.sameGuid maps line numbers to a shared guid, like the many vanilla
+-- tapes that repeat a line such as "[music]"; options.codes maps line
+-- numbers to other codes, e.g. { [12] = "CRP+1" } for a carpentry lesson.
+local function newTape(id, category, lineCount, options)
+    options = options or {}
     local guids, lines = {}, {}
     for i = 1, lineCount do
-        local guid = (sameGuid and sameGuid[i]) or (id .. ":" .. i)
+        local guid = (options.sameGuid and options.sameGuid[i]) or (id .. ":" .. i)
+        local codes = (options.codes and options.codes[i]) or "BOR-1"
         guids[i] = guid
-        lines[i] = { getTextGuid = function() return guid end }
+        lines[i] = {
+            getTextGuid = function() return guid end,
+            getCodes = function() return codes end,
+        }
     end
     return {
         guids = guids,
@@ -126,10 +133,10 @@ end
 -- options.statMax: if set, mimic Build 42.13+ (CharacterStat with that max).
 local function loadMod(options)
     options = options or {}
-    world = { squares = {}, hours = 0, players = {}, halos = {}, handlers = {} }
+    world = { squares = {}, players = {}, halos = {}, handlers = {} }
 
     Events = {}
-    for _, name in ipairs({ "OnDeviceText", "EveryDays" }) do
+    for _, name in ipairs({ "OnDeviceText" }) do
         world.handlers[name] = {}
         Events[name] = {
             Add = function(fn) table.insert(world.handlers[name], fn) end,
@@ -143,9 +150,6 @@ local function loadMod(options)
                 return world.squares[x .. "," .. y .. "," .. z]
             end,
         }
-    end
-    getGameTime = function()
-        return { getWorldAgeHours = function() return world.hours end }
     end
     getNumActivePlayers = function() return #world.players end
     getSpecificPlayer = function(i) return world.players[i + 1] end
@@ -186,13 +190,10 @@ local function showLine(device, guid, passDevice)
         "line text", passDevice ~= false and device or nil)
 end
 
--- Plays lines first..last of the tape in `tv`, one in-game minute apart.
+-- Plays lines first..last (default: all) of the tape in `tv`.
 local function play(tv, first, last)
     local tape = tv.dd.media
-    first = first or 1
-    last = last or #tape.guids
-    for i = first, last do
-        world.hours = world.hours + 1 / 60
+    for i = first or 1, last or #tape.guids do
         showLine(tv, tape.guids[i])
     end
 end
@@ -245,7 +246,6 @@ test("half a tape gives half, and finishing it later gives the rest", function()
     local p = addPlayer(10, 10, 0, 100)
     play(tv, 1, 5)
     near(p.unhappiness, 80, "half")
-    world.hours = world.hours + 5
     play(tv, 6, 10)
     near(p.unhappiness, 60, "rest")
 end)
@@ -253,34 +253,47 @@ end)
 test("a tape that repeats a line still gives its full amount", function()
     loadMod()
     local music = { [2] = "music", [5] = "music", [8] = "music" }
-    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10, music))
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 10, { sameGuid = music }))
     local p = addPlayer(10, 10, 0, 100)
     play(tv)
     near(p.unhappiness, 60)
 end)
 
-test("rewatching within the cooldown gives nothing, after it gives the full amount again", function()
+test("a tape cheers you up only once, however often you rewatch it", function()
     loadMod()
     local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 100)
     play(tv)
     near(p.unhappiness, 60, "first viewing")
-    world.hours = world.hours + 20
-    play(tv)
-    near(p.unhappiness, 60, "rewatch on cooldown")
-    world.hours = world.hours + 4
-    play(tv)
-    near(p.unhappiness, 20, "after the cooldown")
+    for _ = 1, 5 do play(tv) end
+    near(p.unhappiness, 60, "rewatches")
 end)
 
-test("CooldownHours = 0 removes the limit", function()
+test("skill tapes give no happiness, even before their first lesson", function()
+    local cases = {
+        { "carpentry lesson late in the tape", "Retail-VHS", { [17] = "BOR-1,CRP+1" } },
+        { "recipe", "Retail-VHS", { [3] = "RCP=Make Fishing Rod" } },
+        { "home video teaching a skill", "Home-VHS", { [5] = "MTL+1" } },
+    }
+    for _, case in ipairs(cases) do
+        loadMod()
+        local tv = addTV(11, 10, 0, newTape("skill", case[2], 18, { codes = case[3] }))
+        local p = addPlayer(10, 10, 0, 50)
+        play(tv, 1, 1)
+        near(p.unhappiness, 50, case[1] .. ", first line")
+        play(tv)
+        near(p.unhappiness, 50, case[1] .. ", whole tape")
+        assert(#world.halos == 0, case[1] .. ": no halo")
+    end
+end)
+
+test("tapes that only change mood (stress, fatigue, panic) still count", function()
     loadMod()
-    VHSHappiness.Config.CooldownHours = 0
-    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local moods = { [2] = "STS+0.1", [4] = "FAT-1", [6] = "BOR-1, PAN+25" }
+    local tv = addTV(11, 10, 0, newTape("scary-movie", "Retail-VHS", 10, { codes = moods }))
     local p = addPlayer(10, 10, 0, 100)
     play(tv)
-    play(tv)
-    near(p.unhappiness, 20)
+    near(p.unhappiness, 60)
 end)
 
 test("a different tape has its own bonus", function()
@@ -422,12 +435,11 @@ test("halo shows when a tape starts cheering you up, not on every line", functio
     assert(#world.halos == 2, "new halo for a different tape")
 
     tv.dd.media = newTape("movie-1", "Retail-VHS", 18)
-    play(tv, 10, 12)
+    play(tv, 10, 18)
     assert(#world.halos == 3, "new halo when going back to the first tape")
 
-    world.hours = world.hours + 24
-    play(tv, 1, 2)
-    assert(#world.halos == 4, "new halo for a fresh viewing after the cooldown")
+    play(tv)
+    assert(#world.halos == 3, "no halo once the tape is used up")
 end)
 
 test("no halo when already perfectly happy, or when turned off", function()
@@ -466,28 +478,7 @@ test("split-screen players each get their own bonus", function()
     near(p3.unhappiness, 30, "player 3, too far away")
 end)
 
-test("expired records are pruned daily without tripping pairs()", function()
-    loadMod()
-    local tv = addTV(11, 10, 0, newTape("old-1", "Retail-VHS", 5))
-    local p = addPlayer(10, 10, 0, 100)
-    play(tv)
-    tv.dd.media = newTape("old-2", "Retail-VHS", 5)
-    play(tv)
-    world.hours = world.hours + 12
-    tv.dd.media = newTape("recent", "Retail-VHS", 5)
-    play(tv)
-
-    fire("EveryDays")
-    local records = p.modData.VHSHappiness
-    assert(records["old-1"] and records["old-2"] and records["recent"], "all kept during cooldown")
-
-    world.hours = world.hours + 13
-    fire("EveryDays")
-    assert(records["old-1"] == nil and records["old-2"] == nil, "expired records pruned")
-    assert(records["recent"], "record still on cooldown kept")
-end)
-
-test("progress saved by the first version of the mod carries over", function()
+test("progress saved by earlier versions of the mod carries over", function()
     loadMod()
     local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
     local p = addPlayer(10, 10, 0, 100)

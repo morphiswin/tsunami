@@ -1,8 +1,9 @@
 # VHS Happiness (Project Zomboid mod)
 
 Watching a VHS tape on a TV lowers your character's unhappiness, the same way
-reading a book or comic does. Vanilla tapes are mostly about boredom and
-skill XP; this mod adds a proper mood boost on top.
+reading a book or comic does. Each tape only does it once, so finding new
+tapes is worth the trip. Skill tapes are left alone: they still only give
+skill XP.
 
 ## How it works
 
@@ -19,9 +20,13 @@ little. A whole tape gives the same amount as the game's own reading material:
 - The bonus is spread over the tape's lines, so it doesn't matter how long
   the tape is or what day length you play on. Walk away halfway and you get
   half; come back later and finish it for the rest.
-- Each tape gives its full amount once every 24 in-game hours. Rewinding or
-  rewatching the same tape won't keep cheering you up, but a different tape
-  will.
+- **Each tape works once per character, forever.** Rewinding or rewatching
+  a tape you've already finished gives nothing; you need a tape you haven't
+  seen yet.
+- **Skill tapes give no happiness.** Any tape that teaches a skill or recipe
+  (carpentry, cooking, mechanics and so on) only gives the game's normal
+  skill XP. In Build 41's tape list that's 42 of the 263 tapes: 28
+  retail and 14 home videos.
 - You count as watching if you're within 8 tiles of the TV, on the same
   floor, with no wall in the way, and awake.
 - A green "Unhappiness ↓" note pops up when a tape starts cheering you up.
@@ -60,7 +65,6 @@ Open `VHSHappiness.lua` (the one for your build) and change the values in
 | -------------------- | ------- | ----------------------------------------------------- |
 | `RetailVHSTotal`     | 40      | Unhappiness removed by a whole movie / TV tape        |
 | `HomeVHSTotal`       | 20      | Unhappiness removed by a whole home video tape        |
-| `CooldownHours`      | 24      | Hours before the same tape works again (0 = no limit) |
 | `MaxDistance`        | 8       | How many tiles from the TV still counts as watching   |
 | `RequireLineOfSight` | true    | Walls between you and the TV block the bonus          |
 | `ShowHaloText`       | true    | Show the "Unhappiness ↓" note when a tape starts      |

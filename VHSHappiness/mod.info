@@ -1,3 +1,3 @@
 name=VHS Happiness
 id=VHSHappiness
-description=Watching a VHS tape on a TV lowers unhappiness like reading a book or comic. Movie/TV tapes are worth about a book (40), home videos about a comic book (20).
+description=Watching a VHS tape on a TV lowers unhappiness like reading a book or comic, once per tape. Movie/TV tapes are worth about a book (40), home videos about a comic book (20). Skill tapes only give skill XP.
