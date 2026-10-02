@@ -11,6 +11,9 @@
     happiness at all; they only give the game's normal skill XP. Boredom is
     left to the game.
 
+    Nothing here is a fixed list of tapes: tapes and CDs added by other mods
+    work the same way, including ones with their own category names.
+
     Mood values use the same 0-100 scale as the UnhappyChange field in the
     game's literature item scripts:
         ComicBook   UnhappyChange = -20
@@ -41,14 +44,37 @@ VHSHappiness.Config = {
     -- like the game's own "Boredom" arrow.
     ShowHaloText = true,
     HaloText = "Unhappiness",
+
+    -- Line codes that only change how the character feels. A tape with any
+    -- other code (CRP+1, RCP=Make Fishing Rod, codes for skills added by
+    -- other mods, ...) counts as a skill tape and gives no happiness. If a
+    -- mod's movie or music gives no happiness, add the codes it uses here.
+    MoodCodes = {
+        "BOR", -- boredom
+        "STS", -- stress
+        "FAT", -- fatigue
+        "PAN", -- panic
+        "ANG", -- anger
+        "END", -- endurance
+        "HUN", -- hunger
+        "THI", -- thirst
+        "MOR", -- morale
+        "FEA", -- fear
+        "SAN", -- sanity
+        "SIC", -- sickness
+        "PAI", -- pain
+        "DRU", -- drunkenness
+        "UHP", -- unhappiness
+        "UNH", -- unhappiness
+    },
 }
 
 local Config = VHSHappiness.Config
 
--- Codes the game's tapes and CDs use for mood changes (boredom, stress,
--- fatigue, panic). Any other code, like CRP+1 or RCP=Make Fishing Rod, means
--- the tape teaches a skill or recipe.
-local MOOD_CODES = { BOR = true, STS = true, FAT = true, PAN = true }
+local moodCodes = {}
+for _, code in ipairs(Config.MoodCodes) do
+    moodCodes[code] = true
+end
 
 -----------------------------------------------------------------------------
 -- Unhappiness
@@ -80,16 +106,19 @@ end
 -- Tapes and CDs
 -----------------------------------------------------------------------------
 
--- The game's categories are "Retail-VHS", "Home-VHS" and "CDs".
-function VHSHappiness.getMediaTotal(category)
-    local name = string.lower(tostring(category or ""))
-    if string.find(name, "home", 1, true) then
+-- Uses the game's own media type to tell CDs from tapes, so CDs from other
+-- mods count even if they use their own category name. The game's tape
+-- categories are "Retail-VHS" and "Home-VHS"; a modded tape counts as a home
+-- video if its category mentions "home".
+function VHSHappiness.getMediaTotal(media)
+    if media:getMediaType() == RecordedMedia.getMediaTypeForCategory("CDs") then
+        return Config.CDTotal
+    end
+    local category = string.lower(tostring(media:getCategory() or ""))
+    if string.find(category, "home", 1, true) then
         return Config.HomeVHSTotal
     end
-    if string.find(name, "vhs", 1, true) then
-        return Config.RetailVHSTotal
-    end
-    return Config.CDTotal
+    return Config.RetailVHSTotal
 end
 
 local function mediaHasLine(media, guid)
@@ -111,7 +140,7 @@ local function teachesSkill(codes)
     while pos <= length do
         local comma = string.find(codes, ",", pos, true) or length + 1
         local first, last = string.find(codes, "%a+", pos)
-        if first and not MOOD_CODES[string.upper(string.sub(codes, first, last))] then
+        if first and not moodCodes[string.upper(string.sub(codes, first, last))] then
             return true
         end
         pos = comma + 1
@@ -252,7 +281,7 @@ function VHSHappiness.onDeviceText(guid, codes, x, y, z, text, device)
 
     local info = {
         id = media:getId(),
-        total = VHSHappiness.getMediaTotal(media:getCategory()),
+        total = VHSHappiness.getMediaTotal(media),
         lineCount = media:getLineCount(),
     }
     for playerNum = 0, getNumActivePlayers() - 1 do

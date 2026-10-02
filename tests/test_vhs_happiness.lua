@@ -57,13 +57,18 @@ end
 -- Every line has the code "BOR-1" (boredom), like most vanilla lines.
 -- options.sameGuid maps line numbers to a shared guid, like the many vanilla
 -- tapes that repeat a line such as "[music]"; options.codes maps line
--- numbers to other codes, e.g. { [12] = "CRP+1" } for a carpentry lesson.
+-- numbers to other codes, e.g. { [12] = "CRP+1" } for a carpentry lesson
+-- (false means the line has no codes). options.mediaType overrides the
+-- game's media type, which otherwise comes from the category.
 local function newTape(id, category, lineCount, options)
     options = options or {}
     local guids, lines = {}, {}
     for i = 1, lineCount do
         local guid = (options.sameGuid and options.sameGuid[i]) or (id .. ":" .. i)
-        local codes = (options.codes and options.codes[i]) or "BOR-1"
+        local codes = "BOR-1"
+        if options.codes and options.codes[i] ~= nil then
+            codes = options.codes[i] or nil
+        end
         guids[i] = guid
         lines[i] = {
             getTextGuid = function() return guid end,
@@ -74,6 +79,9 @@ local function newTape(id, category, lineCount, options)
         guids = guids,
         getId = function() return id end,
         getCategory = function() return category end,
+        getMediaType = function()
+            return options.mediaType or RecordedMedia.getMediaTypeForCategory(category)
+        end,
         getLineCount = function() return lineCount end,
         getLine = function(_, i) return lines[i + 1] end, -- 0-based, like Java
     }
@@ -175,6 +183,11 @@ local function loadMod(options)
     getNumActivePlayers = function() return #world.players end
     getSpecificPlayer = function(i) return world.players[i + 1] end
     instanceof = function(obj, name) return type(obj) == "table" and obj.__class == name end
+    -- In the game, the type comes from the category: "CDs" are CDs, anything
+    -- else is a VHS tape.
+    RecordedMedia = {
+        getMediaTypeForCategory = function(category) return category == "CDs" and 0 or 1 end,
+    }
 
     if options.statMax then
         local stat = { max = options.statMax }
@@ -449,6 +462,54 @@ test("someone else's CD player only counts if you're close enough", function()
     play(addCarriedCDPlayer(owner, newTape("album", "CDs", 10), { 0, 0, 0 }))
     near(owner.unhappiness, 30, "owner, position unknown")
     near(friend.unhappiness, 50, "friend, when the game doesn't say where it is")
+end)
+
+test("modded tapes and CDs with their own category names count", function()
+    local cases = {
+        { "modded movie", "Expanded-Movies", nil, 40 },
+        { "modded home video", "Modded-HomeMovies", nil, 20 },
+        { "modded CD", "Modded-Albums", 0, 20 },
+    }
+    for _, case in ipairs(cases) do
+        loadMod()
+        local p = addPlayer(10, 10, 0, 100)
+        local media = newTape("modded", case[2], 12, { mediaType = case[3] })
+        if case[3] == 0 then
+            play(addCarriedCDPlayer(p, media))
+        else
+            play(addTV(11, 10, 0, media))
+        end
+        near(p.unhappiness, 100 - case[4], case[1])
+    end
+end)
+
+test("modded entertainment that uses other mood codes still counts", function()
+    loadMod()
+    local codes = { [1] = "HUN+5", [2] = "THI+5,ANG-2", [3] = "UHP-1", [4] = "end-1" }
+    local tv = addTV(11, 10, 0, newTape("modded-movie", "Retail-VHS", 10, { codes = codes }))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv)
+    near(p.unhappiness, 60)
+end)
+
+test("modded tapes teaching skills the game doesn't have yet still give no happiness", function()
+    for _, code in ipairs({ "SPR+1", "BUT+2", "XYZ+1", "RCP=Make Modded Thing" }) do
+        loadMod()
+        local tv = addTV(11, 10, 0, newTape("modded-skill", "Retail-VHS", 10, { codes = { [6] = code } }))
+        local p = addPlayer(10, 10, 0, 50)
+        play(tv)
+        near(p.unhappiness, 50, code)
+    end
+end)
+
+test("modded tapes with no codes on their lines count", function()
+    loadMod()
+    local none = {}
+    for i = 1, 10 do none[i] = false end
+    local tv = addTV(11, 10, 0, newTape("modded-movie", "Retail-VHS", 10, { codes = none }))
+    local p = addPlayer(10, 10, 0, 100)
+    play(tv)
+    near(p.unhappiness, 60)
 end)
 
 test("tapes and CDs each keep their own progress", function()

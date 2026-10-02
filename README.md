@@ -38,6 +38,23 @@ game's own reading material:
   alongside the game's own "Boredom" note.
 - Boredom and skill XP from tapes and CDs are left to the vanilla game.
 
+## Tapes and CDs from other mods
+
+There's no fixed list of tapes or CDs: the mod reads each one from the game
+as it plays, so ones added by other mods work the same way.
+
+- CDs and tapes are told apart by the game's own media type, so modded ones
+  count even with their own category names. A modded tape is worth 20 like a
+  home video if its category name contains "home", otherwise 40 like a movie.
+- Modded skill tapes are spotted the same way as the game's: any line code
+  that isn't a mood code (including codes for skills other mods add) means it
+  teaches something, so it gives no happiness.
+- TVs, radios and CD players added by other mods work too.
+- Not covered: mods that play real audio files through their own players
+  instead of the game's tape and CD lines.
+- If a mod's movie or music gives no happiness, it probably uses a mood code
+  this mod doesn't know. Add that code to `MoodCodes`.
+
 ## Install (local mod)
 
 1. Copy the `VHSHappiness` folder into your Zomboid mods folder:
@@ -67,17 +84,20 @@ the other.
 Open `VHSHappiness.lua` (the one for your build) and change the values in
 `VHSHappiness.Config` at the top:
 
-| Setting              | Default | Meaning                                               |
-| -------------------- | ------- | ----------------------------------------------------- |
-| `RetailVHSTotal`     | 40      | Unhappiness removed by a whole movie / TV tape        |
-| `HomeVHSTotal`       | 20      | Unhappiness removed by a whole home video tape        |
-| `CDTotal`            | 20      | Unhappiness removed by a whole music CD               |
-| `MaxDistance`        | 8       | Tiles from a TV or radio that still count             |
-| `RequireLineOfSight` | true    | Walls between you and a TV or radio block the bonus   |
-| `ShowHaloText`       | true    | Show the "Unhappiness ↓" note with each line          |
+| Setting              | Default  | Meaning                                                    |
+| -------------------- | -------- | ---------------------------------------------------------- |
+| `RetailVHSTotal`     | 40       | Unhappiness removed by a whole movie / TV tape             |
+| `HomeVHSTotal`       | 20       | Unhappiness removed by a whole home video tape             |
+| `CDTotal`            | 20       | Unhappiness removed by a whole music CD                    |
+| `MaxDistance`        | 8        | Tiles from a TV or radio that still count                  |
+| `RequireLineOfSight` | true     | Walls between you and a TV or radio block the bonus        |
+| `ShowHaloText`       | true     | Show the "Unhappiness ↓" note with each line               |
+| `MoodCodes`          | 16 codes | Line codes that only change mood; anything else is a skill |
 
 ## Notes
 
+- A mod that already gives happiness for tapes or CDs will stack with this
+  one.
 - Built for single-player. In multiplayer the client changes the stat
   itself, so a server that owns player stats may override it.
 - Supports both stat systems: `BodyDamage` unhappiness (Build 41 to 42.12)
