@@ -79,26 +79,47 @@ local function newTape(id, category, lineCount, options)
     }
 end
 
--- Places a radio/TV at (x, y, z). Returns the world object; its device data
--- is in .dd so tests can tweak it.
-local function addDevice(x, y, z, tape, isTV)
-    local dd = { tv = isTV ~= false, playing = tape ~= nil, media = tape }
-    function dd:getIsTelevision() return self.tv end
+local function newDeviceData(media, parent, inInventory)
+    local dd = { playing = media ~= nil, media = media, parent = parent, inInventory = inInventory }
     function dd:isPlayingMedia() return self.playing end
     function dd:getMediaData() return self.media end
-    local obj = { __class = "IsoWaveSignal", x = x, y = y, z = z, dd = dd }
+    function dd:isInventoryDevice() return self.inInventory end
+    function dd:getParent() return self.parent end
+    return dd
+end
+
+-- Places a TV, radio or stereo at (x, y, z) playing `media` (a tape, a CD,
+-- or nil for nothing). Returns the world object; its device data is in .dd
+-- so tests can tweak it.
+local function addDevice(x, y, z, media)
+    local obj = { __class = "IsoWaveSignal", x = x, y = y, z = z }
+    obj.dd = newDeviceData(media, obj, false)
     function obj:getDeviceData() return self.dd end
     table.insert(getSquare(x, y, z).objects, obj)
     return obj
 end
 
-local function addTV(x, y, z, tape) return addDevice(x, y, z, tape, true) end
+local addTV = addDevice
+
+-- A CD player item in `player`'s inventory (or a bag they carry). The game
+-- reports where a line was shown from the device's position, which for a
+-- carried item is normally the player's; `reportedAt` overrides it.
+local function addCarriedCDPlayer(player, cd, reportedAt)
+    local item = { inventory = player.inventory }
+    function item:getOutermostContainer() return self.inventory end
+    function item:getDeviceData() return self.dd end
+    item.dd = newDeviceData(cd, item, true)
+    local at = reportedAt or { player.x, player.y, player.z }
+    item.x, item.y, item.z = at[1], at[2], at[3]
+    return item
+end
 
 local function newPlayer(x, y, z, unhappiness)
     local p = {
         num = 0, x = x, y = y, z = z, dead = false, asleep = false,
-        modData = {}, unhappiness = unhappiness,
+        modData = {}, unhappiness = unhappiness, inventory = {},
     }
+    function p:getInventory() return self.inventory end
     function p:getCurrentSquare() return getSquare(self.x, self.y, self.z) end
     function p:getPlayerNum() return self.num end
     function p:isDead() return self.dead end
@@ -200,6 +221,7 @@ end
 
 local function addPlayer(x, y, z, unhappiness)
     local p = newPlayer(x, y, z, unhappiness)
+    getSquare(x, y, z) -- the ground the player stands on is loaded
     p.num = #world.players
     table.insert(world.players, p)
     return p
@@ -343,18 +365,100 @@ test("a tape line still counts if playback stopped as it was shown", function()
     near(p.unhappiness, 46)
 end)
 
-test("no bonus from a TV with no tape, or from a radio playing a CD", function()
+test("no bonus from a TV or radio with nothing playing", function()
     loadMod()
     local tv = addTV(11, 10, 0, nil)
+    local radio = addDevice(10, 11, 0, nil)
     local p = addPlayer(10, 10, 0, 50)
-    showLine(tv, "broadcast-line")
-    near(p.unhappiness, 50, "no tape")
+    showLine(tv, "tv-broadcast-line")
+    showLine(radio, "radio-broadcast-line")
+    near(p.unhappiness, 50)
+end)
+
+test("radio broadcasts don't count, even with a CD inserted", function()
+    loadMod()
+    local p = addPlayer(10, 10, 0, 50)
+    local cdPlayer = addCarriedCDPlayer(p, newTape("album", "CDs", 10))
+    cdPlayer.dd.playing = false
+    showLine(cdPlayer, "radio-broadcast-line")
+    near(p.unhappiness, 50)
+end)
+
+test("whole CD on a CD player you carry gives a comic's worth (20)", function()
+    loadMod()
+    local p = addPlayer(10, 10, 0, 80)
+    local cdPlayer = addCarriedCDPlayer(p, newTape("album", "CDs", 13))
+    play(cdPlayer, 1, 1)
+    near(p.unhappiness, 80 - 20 / 13, "after 1 line")
+    play(cdPlayer, 2, 13)
+    near(p.unhappiness, 60, "after the whole CD")
+    assert(#world.halos == 13, "a halo per line, got " .. #world.halos)
+end)
+
+test("a CD player you carry counts wherever the game says the line came from", function()
+    for _, at in ipairs({ { 0, 0, 0 }, { 300, 300, 0 }, { 10, 10, 1 } }) do
+        loadMod()
+        local p = addPlayer(10, 10, 0, 80)
+        local cdPlayer = addCarriedCDPlayer(p, newTape("album", "CDs", 10), at)
+        play(cdPlayer)
+        near(p.unhappiness, 60, "reported at " .. table.concat(at, ","))
+    end
+end)
+
+test("a CD cheers you up only once, however often you replay it", function()
+    loadMod()
+    local p = addPlayer(10, 10, 0, 100)
+    local cdPlayer = addCarriedCDPlayer(p, newTape("album", "CDs", 10))
+    for _ = 1, 4 do play(cdPlayer) end
+    near(p.unhappiness, 80)
+end)
+
+test("no CD bonus while asleep or dead, even when carrying the CD player", function()
+    for _, field in ipairs({ "asleep", "dead" }) do
+        loadMod()
+        local p = addPlayer(10, 10, 0, 50)
+        p[field] = true
+        play(addCarriedCDPlayer(p, newTape("album", "CDs", 10)))
+        near(p.unhappiness, 50, field)
+    end
+end)
+
+test("a CD playing in the world follows the same distance rules as a TV", function()
+    loadMod()
+    local stereo = addDevice(14, 10, 0, newTape("album", "CDs", 10))
+    local near1 = addPlayer(10, 10, 0, 50)
+    local far = addPlayer(30, 10, 0, 50)
+    play(stereo)
+    near(near1.unhappiness, 30, "4 tiles away")
+    near(far.unhappiness, 50, "20 tiles away")
+end)
+
+test("someone else's CD player only counts if you're close enough", function()
+    loadMod()
+    local owner = addPlayer(10, 10, 0, 50)
+    local friend = addPlayer(12, 10, 0, 50)
+    local stranger = addPlayer(30, 10, 0, 50)
+    play(addCarriedCDPlayer(owner, newTape("album", "CDs", 10)))
+    near(owner.unhappiness, 30, "owner")
+    near(friend.unhappiness, 30, "split-screen friend next to them")
+    near(stranger.unhappiness, 50, "split-screen player far away")
 
     loadMod()
-    local radio = addDevice(11, 10, 0, newTape("cd", "CDs", 10), false)
-    p = addPlayer(10, 10, 0, 50)
-    play(radio)
-    near(p.unhappiness, 50, "CD on a radio")
+    owner = addPlayer(10, 10, 0, 50)
+    friend = addPlayer(12, 10, 0, 50)
+    play(addCarriedCDPlayer(owner, newTape("album", "CDs", 10), { 0, 0, 0 }))
+    near(owner.unhappiness, 30, "owner, position unknown")
+    near(friend.unhappiness, 50, "friend, when the game doesn't say where it is")
+end)
+
+test("tapes and CDs each keep their own progress", function()
+    loadMod()
+    local tv = addTV(11, 10, 0, newTape("movie", "Retail-VHS", 18))
+    local p = addPlayer(10, 10, 0, 100)
+    local cdPlayer = addCarriedCDPlayer(p, newTape("album", "CDs", 10))
+    play(tv)
+    play(cdPlayer)
+    near(p.unhappiness, 40)
 end)
 
 test("no bonus when too far, on another floor, out of sight, asleep or dead", function()
